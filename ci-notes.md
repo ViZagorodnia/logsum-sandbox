@@ -10,7 +10,7 @@
 
 ## Run 1 — RED ❌
 
-**PR:** <!-- вставте URL PR -->
+**PR:** https://github.com/ViZagorodnia/logsum-sandbox/pull/1
 
 **Cause (AI diagnosis):**
 ```
@@ -24,7 +24,7 @@ Bug is in **code** (not workflow, not test): unused import in `src/debug_temp.py
 
 ## Run 2 — GREEN ✅
 
-**CI run link:** <!-- вставте URL конкретного запуску Actions -->
+**CI run link:** https://github.com/ViZagorodnia/logsum-sandbox/actions/runs/31123755227
 
 **What ran:**
 - `ruff check .` → passed, 0 violations
