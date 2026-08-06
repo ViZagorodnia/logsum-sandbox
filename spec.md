@@ -174,3 +174,24 @@ The following are explicitly **not** part of this specification:
 ## Signed off
 
 VN — 2026-08-06
+
+---
+
+## Implementation notes
+
+*Kata 5.3 — added 2026-08-06*
+
+**Surprise: exit-code 3 needs two separate counters.**
+The spec defines two different Exit-3 messages: "No log entries found." (header-only
+file) vs "No log entries match the active filters." (rows exist but all filtered out).
+A single `len(counts) == 0` check cannot distinguish them — the AI's first draft used
+only one counter and always printed the "no entries" message even when the real cause
+was a filter mismatch. The fix was to track `total_data_rows` (before filters) and
+`matched_rows` (after filters) separately and branch on both.
+
+**Decision: positional shorthand accepted alongside `--input` / `--output`.**
+The CLI spec defines `--input` as a required flag, but the kata run command uses bare
+positionals (`python -m src.logsum data/sample_events.csv data/summary.csv`).
+Rather than reject the positional form, the parser absorbs positional args into
+`--input` / `--output` when the flags are absent — keeping both invocation styles
+valid without changing the spec contract.
