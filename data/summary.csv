@@ -1,0 +1,8 @@
+service,level,count
+checkout-service,ERROR,3
+identity-service,INFO,1
+checkout-service,WARN,1
+cart-api,WARN,1
+cart-api,INFO,1
+monitoring-service,DEBUG,1
+cart-api,,1
