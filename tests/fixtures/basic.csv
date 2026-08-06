@@ -1,0 +1,14 @@
+timestamp,level,service,message
+2026-08-01T08:00:01Z,INFO,identity-service,Token issued for user u-1042
+2026-08-01T08:01:15Z,ERROR,checkout-service,Payment gateway timeout — retry 1/3
+2026-08-01T08:01:25Z,WARN,cart-api,Cart session not found cs-9900
+2026-08-01T08:02:00Z,INFO,identity-service,Token refresh for user u-2000
+2026-08-01T08:02:10Z,ERROR,checkout-service,Payment gateway timeout — retry 2/3
+2026-08-01T08:02:20Z,INFO,checkout-service,Order placed successfully o-0501
+2026-08-01T08:02:30Z,WARN,checkout-service,Low stock warning sku-4421
+2026-08-01T08:03:00Z,INFO,cart-api,Cart created cs-9901
+2026-08-01T08:03:10Z,INFO,cart-api,Cart created cs-9902
+2026-08-01T08:03:20Z,INFO,cart-api,Cart created cs-9903
+2026-08-01T08:03:30Z,ERROR,cart-api,Cart persistence error cs-9904
+2026-08-01T08:03:40Z,WARN,identity-service,Token expiry warning u-1042
+2026-08-01T08:03:50Z,ERROR,identity-service,Auth failure u-9999
