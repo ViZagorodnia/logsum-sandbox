@@ -96,6 +96,68 @@ def _norm_service(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Core logic helpers
+# ---------------------------------------------------------------------------
+
+def _resolve_columns(reader: csv.DictReader) -> tuple[str, str]:
+    """Return (lv_col, sv_col) raw header names, or exit(2) on bad headers."""
+    raw_fields = reader.fieldnames
+    if not raw_fields:
+        # Completely empty file — no header at all
+        print("Missing required column: timestamp", file=sys.stderr)
+        sys.exit(2)
+
+    # Build normalised → raw header map to handle whitespace-padded headers
+    field_map: dict[str, str] = {f.strip().lower(): f for f in raw_fields}
+
+    missing = REQUIRED_COLUMNS - set(field_map)
+    if missing:
+        print(f"Missing required column: {sorted(missing)[0]}", file=sys.stderr)
+        sys.exit(2)
+
+    return field_map["level"], field_map["service"]
+
+
+def _aggregate(
+    reader: csv.DictReader,
+    lv_col: str,
+    sv_col: str,
+    level_filter_norm: str | None,
+    service_filter_norm: str | None,
+) -> tuple[collections.Counter, int, int]:
+    """Count (service, level) pairs; return (counts, total_rows, matched_rows)."""
+    counts: collections.Counter[tuple[str, str]] = collections.Counter()
+    total_data_rows = 0
+    matched_rows = 0
+
+    for row in reader:
+        total_data_rows += 1
+
+        service_norm = _norm_service(row.get(sv_col, ""))
+        level_norm = _norm_level(row.get(lv_col, ""))
+
+        # Apply pre-filters (spec §Inputs — --level / --service flags)
+        # Unknown level values are NOT collapsed to OTHER (spec §Normalisation rules)
+        if level_filter_norm is not None and level_norm != level_filter_norm:
+            continue
+        if service_filter_norm is not None and service_norm != service_filter_norm:
+            continue
+
+        counts[(service_norm, level_norm)] += 1
+        matched_rows += 1
+
+    return counts, total_data_rows, matched_rows
+
+
+def _write_csv(dest, sorted_groups) -> None:
+    """Write the summary CSV header and data rows to *dest*."""
+    writer = csv.writer(dest, lineterminator="\n")
+    writer.writerow(OUTPUT_COLUMNS)
+    for (service, level), count in sorted_groups:
+        writer.writerow([service, level, count])
+
+
+# ---------------------------------------------------------------------------
 # Core logic
 # ---------------------------------------------------------------------------
 
@@ -106,18 +168,9 @@ def summarise(
     service_filter: str | None,
 ) -> None:
     """Read input CSV, aggregate, write summary CSV.  Exits on any error."""
+    level_filter_norm = _norm_level(level_filter) if level_filter is not None else None
+    service_filter_norm = _norm_service(service_filter) if service_filter is not None else None
 
-    # Normalise filter values once up front
-    level_filter_norm = (
-        level_filter.strip().upper() if level_filter is not None else None
-    )
-    service_filter_norm = (
-        service_filter.strip() if service_filter is not None else None
-    )
-
-    # ------------------------------------------------------------------
-    # Open input (edge case 1: file not found / permission denied)
-    # ------------------------------------------------------------------
     try:
         fh = open(input_path, newline="", encoding="utf-8")
     except OSError as exc:
@@ -129,50 +182,11 @@ def summarise(
 
     with fh:
         reader = csv.DictReader(fh)
+        lv_col, sv_col = _resolve_columns(reader)
+        counts, total_data_rows, matched_rows = _aggregate(
+            reader, lv_col, sv_col, level_filter_norm, service_filter_norm
+        )
 
-        # DictReader reads the header row lazily on first .fieldnames access
-        raw_fields = reader.fieldnames
-        if not raw_fields:
-            # Completely empty file — no header at all
-            print("Missing required column: timestamp", file=sys.stderr)
-            sys.exit(2)
-
-        # Build normalised → raw header map to handle whitespace-padded headers
-        field_map: dict[str, str] = {f.strip().lower(): f for f in raw_fields}
-
-        # Edge case 2: required column missing
-        missing = REQUIRED_COLUMNS - set(field_map)
-        if missing:
-            print(f"Missing required column: {sorted(missing)[0]}", file=sys.stderr)
-            sys.exit(2)
-
-        lv_col = field_map["level"]
-        sv_col = field_map["service"]
-        # timestamp and message columns are accepted but not used in grouping
-
-        counts: collections.Counter[tuple[str, str]] = collections.Counter()
-        total_data_rows = 0   # rows present in file (before filters)
-        matched_rows = 0      # rows that passed all filters
-
-        for row in reader:
-            total_data_rows += 1
-
-            service_norm = _norm_service(row.get(sv_col, ""))
-            level_norm = _norm_level(row.get(lv_col, ""))
-
-            # Apply pre-filters (spec §Inputs — --level / --service flags)
-            # Unknown level values are NOT collapsed to OTHER (spec §Normalisation rules)
-            if level_filter_norm is not None and level_norm != level_filter_norm:
-                continue
-            if service_filter_norm is not None and service_norm != service_filter_norm:
-                continue
-
-            counts[(service_norm, level_norm)] += 1
-            matched_rows += 1
-
-    # ------------------------------------------------------------------
-    # Exit-3 edge cases
-    # ------------------------------------------------------------------
     if total_data_rows == 0:
         # Edge case 3: header-only file — no data rows at all
         print("No log entries found.", file=sys.stderr)
@@ -183,29 +197,17 @@ def summarise(
         print("No log entries match the active filters.", file=sys.stderr)
         sys.exit(3)
 
-    # ------------------------------------------------------------------
-    # Sort by count descending  (stable — ties keep insertion order)
-    # ------------------------------------------------------------------
     sorted_groups = sorted(counts.items(), key=lambda kv: -kv[1])
-
-    # ------------------------------------------------------------------
-    # Write output CSV
-    # ------------------------------------------------------------------
-    def _write_csv(dest) -> None:
-        writer = csv.writer(dest, lineterminator="\n")
-        writer.writerow(OUTPUT_COLUMNS)
-        for (service, level), count in sorted_groups:
-            writer.writerow([service, level, count])
 
     if output_path is None:
         # Stdout: buffer to avoid mixing with any deferred error text
         buf = io.StringIO()
-        _write_csv(buf)
+        _write_csv(buf, sorted_groups)
         sys.stdout.write(buf.getvalue())
     else:
         try:
             with open(output_path, "w", encoding="utf-8", newline="") as out_fh:
-                _write_csv(out_fh)
+                _write_csv(out_fh, sorted_groups)
         except OSError as exc:
             print(
                 f"Error: cannot open '{output_path}': {exc.strerror}",
