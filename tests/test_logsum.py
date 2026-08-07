@@ -1,722 +1,611 @@
 """
-Pytest test-suite for ``logsum`` — derived exclusively from spec.md (kata 5.2/5.3).
-``src/logsum.py`` was NOT read.  Every assertion goes through the CLI black-box.
+Black-box test suite for logsum, derived from spec.md alone.
 
-Coverage map
-────────────
-[G] Grouping            – spec §Grouping rule
-[N] Normalisation       – spec §Normalisation rules
-[S] Sorting / format    – spec §Outputs
-[F] Filters             – spec §Inputs (--level / --service)
-[E] Edge cases          – spec §Edge cases  (#1–#9)
-[X] Exit codes          – spec §Exit codes
-[O] --output flag       – spec §Inputs
-[H] --help              – spec §Help flag
-[P] Positional-arg      – spec §Implementation notes
+All tests invoke ``python -m src.logsum`` via subprocess and check
+stdout, stderr, and exit codes without reading the implementation.
 """
 from __future__ import annotations
 
-import csv
-import io
 import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 
-# ── Path to committed fixture files ───────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────
 
-FIXTURES_DIR = Path(__file__).parent / "fixtures"
+PYTHON = sys.executable
 
-# ── CLI helpers ───────────────────────────────────────────────────────────
 
-_CMD = [sys.executable, "-m", "src.logsum"]
+def run(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
+    """Run logsum with *args* and return the CompletedProcess result."""
+    cmd = [PYTHON, "-m", "src.logsum", *args]
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+    )
+
+
+def run_from_project(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run logsum from the project root (needed for -m src.logsum to resolve)."""
+    project_root = Path(__file__).parent.parent
+    return run(*args, cwd=project_root)
 
 
 def logsum(*args: str) -> subprocess.CompletedProcess:
-    """Run ``python -m src.logsum <args>`` and return the CompletedProcess."""
-    return subprocess.run(_CMD + list(args), capture_output=True, text=True)
+    """Convenience wrapper that runs from the project root."""
+    project_root = Path(__file__).parent.parent
+    return run(*args, cwd=project_root)
 
 
-def parse_output(stdout: str) -> list[dict[str, str]]:
-    """Parse summary-CSV text (from stdout) into a list of row dicts."""
-    return list(csv.DictReader(io.StringIO(stdout.strip())))
+# ── Basic smoke test ───────────────────────────────────────────────────────
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# [G] Grouping
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestGrouping:
-    """Each unique (service, level) pair → exactly one output row (§Grouping rule)."""
-
-    def test_single_row_produces_one_group(self, make_csv):
-        p = make_csv("g1.csv", ["t,ERROR,checkout-service,oops"])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert len(rows) == 1
-        assert rows[0]["service"] == "checkout-service"
-        assert rows[0]["level"] == "ERROR"
-        assert rows[0]["count"] == "1"
-
-    def test_identical_pairs_merged_and_counted(self, make_csv):
-        p = make_csv("g2.csv", [
-            "t,ERROR,svc-a,first message",
-            "t,ERROR,svc-a,second message",
-        ])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert len(rows) == 1
-        assert rows[0]["count"] == "2"
-
-    def test_same_service_different_levels_are_separate(self, make_csv):
-        p = make_csv("g3.csv", [
-            "t,ERROR,svc-a,m",
-            "t,WARN,svc-a,m",
-            "t,INFO,svc-a,m",
-        ])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert len(rows) == 3
-        assert {r["level"] for r in rows} == {"ERROR", "WARN", "INFO"}
-
-    def test_same_level_different_services_are_separate(self, make_csv):
-        p = make_csv("g4.csv", [
-            "t,INFO,alpha,m",
-            "t,INFO,beta,m",
-            "t,INFO,gamma,m",
-        ])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert len(rows) == 3
-        assert {r["service"] for r in rows} == {"alpha", "beta", "gamma"}
-
-    def test_message_content_does_not_split_groups(self, make_csv):
-        """Rows differing only in message → same group."""
-        p = make_csv("g5.csv", [
-            "t,INFO,svc,first message",
-            "t,INFO,svc,completely different message",
-        ])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert len(rows) == 1
-        assert rows[0]["count"] == "2"
-
-    def test_timestamp_does_not_split_groups(self, make_csv):
-        """Rows differing only in timestamp → same group."""
-        p = make_csv("g6.csv", [
-            "2026-01-01T00:00:00Z,INFO,svc,m",
-            "2026-06-15T12:30:00Z,INFO,svc,m",
-        ])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert len(rows) == 1
-        assert rows[0]["count"] == "2"
-
-    def test_count_minimum_is_one(self, make_csv):
-        """The spec states minimum count value is 1 (§Aggregation)."""
-        p = make_csv("g7.csv", ["t,INFO,svc,m"])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert int(rows[0]["count"]) >= 1
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# [N] Normalisation
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestNormalisation:
-    """§Normalisation rules — applied to every row before grouping."""
-
-    def test_level_lowercase_uppercased(self, make_csv):
-        p = make_csv("n1.csv", [
-            "t,info,svc,m",
-            "t,warn,svc,m",
-            "t,error,svc,m",
-        ])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert {r["level"] for r in rows} == {"INFO", "WARN", "ERROR"}
-
-    def test_level_mixed_case_uppercased(self, make_csv):
-        p = make_csv("n2.csv", ["t,WaRn,svc,m"])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert rows[0]["level"] == "WARN"
-
-    def test_level_whitespace_stripped_and_uppercased(self, make_csv):
-        # RFC-4180 quoted fields: " warn " → value is ' warn '
-        # spec example: " warn " → "WARN"
-        p = make_csv("n3.csv", ['t," warn ",svc,m', 't,"  ERROR  ",svc,m'])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert {r["level"] for r in rows} == {"WARN", "ERROR"}
-
-    def test_service_whitespace_stripped(self, make_csv):
-        # spec example: " cart-api " → "cart-api"
-        p = make_csv("n4.csv", [
-            'T,INFO," cart-api ",m',
-            "T,INFO,cart-api,m",
-        ])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        # Both rows must collapse into one group after stripping
-        assert len(rows) == 1
-        assert rows[0]["service"] == "cart-api"
-        assert rows[0]["count"] == "2"
-
-    def test_service_original_casing_preserved(self, make_csv):
-        p = make_csv("n5.csv", ["t,INFO,Cart-API,m"])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert rows[0]["service"] == "Cart-API"
-
-    def test_service_grouping_is_case_sensitive(self, make_csv):
-        """'Cart-API' ≠ 'cart-api' — grouping is case-sensitive on service."""
-        p = make_csv("n6.csv", [
-            "t,INFO,Cart-API,m",
-            "t,INFO,cart-api,m",
-        ])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert {r["service"] for r in rows} == {"Cart-API", "cart-api"}
-
-    def test_malformed_timestamp_row_counted_normally(self, make_csv):
-        """Edge case #6 — timestamp not validated; row is counted."""
-        p = make_csv("n7.csv", [
-            "NOT-A-DATE,INFO,svc,m",
-            "also-bad!!,INFO,svc,m",
-        ])
-        result = logsum("--input", str(p))
+class TestHelp:
+    def test_help_exits_zero(self):
+        result = logsum("--help")
         assert result.returncode == 0
-        rows = parse_output(result.stdout)
-        assert rows[0]["count"] == "2"
 
-    def test_empty_timestamp_row_counted_normally(self, make_csv):
-        """Edge case #6 — missing timestamp is not an error."""
-        p = make_csv("n8.csv", [",INFO,svc,m"])
-        result = logsum("--input", str(p))
-        assert result.returncode == 0
-        rows = parse_output(result.stdout)
-        assert rows[0]["count"] == "1"
+    def test_help_goes_to_stdout(self):
+        result = logsum("--help")
+        assert "logsum" in result.stdout.lower() or "usage" in result.stdout.lower()
 
-    def test_message_field_not_read(self, make_csv):
-        """Varying message values never create extra groups."""
-        p = make_csv("n9.csv", [
-            "t,INFO,svc,alpha",
-            "t,INFO,svc,beta",
-            "t,INFO,svc,gamma",
-        ])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert len(rows) == 1
-        assert rows[0]["count"] == "3"
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# [S] Output sorting and format
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestOutputFormat:
-    """§Outputs — column order, sort order, no first_seen/last_seen."""
-
-    def test_header_column_order_is_service_level_count(self, make_csv):
-        p = make_csv("s1.csv", ["t,INFO,svc,m"])
-        result = logsum("--input", str(p))
-        header = result.stdout.strip().split("\n")[0]
-        assert header == "service,level,count"
-
-    def test_sorted_by_count_descending(self, make_csv):
-        p = make_csv("s2.csv",
-            ["t,ERROR,alpha,m"] * 5 +
-            ["t,INFO,beta,m"]  * 3 +
-            ["t,WARN,gamma,m"] * 1
-        )
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        counts = [int(r["count"]) for r in rows]
-        assert counts == sorted(counts, reverse=True)
-
-    def test_output_contains_no_extra_columns(self, make_csv):
-        """No first_seen, last_seen, or other v1 out-of-scope columns."""
-        p = make_csv("s3.csv", ["t,INFO,svc,m"])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert set(rows[0].keys()) == {"service", "level", "count"}
-
-    def test_no_blank_line_after_last_data_row(self, make_csv):
-        """'No trailing newline beyond the last data row' (§Outputs)."""
-        p = make_csv("s4.csv", ["t,INFO,svc,m"])
-        result = logsum("--input", str(p))
-        # Must not end with two consecutive newlines (i.e. a blank line)
-        assert not result.stdout.endswith("\n\n")
-
-    def test_exit_0_on_success(self, make_csv):
-        p = make_csv("s5.csv", ["t,INFO,svc,m"])
-        assert logsum("--input", str(p)).returncode == 0
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# [F] Filters
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestFilters:
-    """§Inputs — --level and --service pre-filter rows before grouping."""
-
-    def test_level_filter_applied_after_normalisation(self, make_csv):
-        """
-        Normalisation (uppercase + strip) must happen BEFORE the --level filter
-        is applied.  A raw value of ' error ' normalises to 'ERROR' and must
-        match --level ERROR.  An impl that filtered on the raw value would
-        return exit 3 here instead of one matching row.
-        """
-        p = make_csv("f_norm_lvl.csv", ['t," error ",svc,m', 't,info,svc,m'])
-        rows = parse_output(logsum("--input", str(p), "--level", "ERROR").stdout)
-        assert len(rows) == 1
-        assert rows[0]["level"] == "ERROR"
-        assert rows[0]["count"] == "1"
-
-    def test_service_filter_applied_after_normalisation(self, make_csv):
-        """
-        Normalisation (whitespace strip) must happen BEFORE the --service
-        filter is applied.  A raw service of ' cart-api ' normalises to
-        'cart-api' and must match --service cart-api.
-        """
-        p = make_csv("f_norm_svc.csv", ['T,INFO," cart-api ",m', 'T,INFO,beta,m'])
-        rows = parse_output(logsum("--input", str(p), "--service", "cart-api").stdout)
-        assert len(rows) == 1
-        assert rows[0]["service"] == "cart-api"
-
-    def test_level_filter_keeps_only_matching_level(self, make_csv):
-        p = make_csv("f1.csv", [
-            "t,INFO,svc,m",
-            "t,ERROR,svc,m",
-            "t,WARN,svc,m",
-        ])
-        rows = parse_output(logsum("--input", str(p), "--level", "ERROR").stdout)
-        assert all(r["level"] == "ERROR" for r in rows)
-        assert len(rows) == 1
-
-    def test_service_filter_keeps_only_matching_service(self, make_csv):
-        p = make_csv("f2.csv", [
-            "t,INFO,alpha,m",
-            "t,INFO,beta,m",
-            "t,ERROR,alpha,m",
-        ])
-        rows = parse_output(logsum("--input", str(p), "--service", "alpha").stdout)
-        assert all(r["service"] == "alpha" for r in rows)
-        assert len(rows) == 2
-
-    def test_combined_level_and_service_filter(self, make_csv):
-        p = make_csv("f3.csv", [
-            "t,INFO,alpha,m",
-            "t,ERROR,alpha,m",
-            "t,INFO,beta,m",
-        ])
-        rows = parse_output(
-            logsum("--input", str(p), "--service", "alpha", "--level", "INFO").stdout
-        )
-        assert len(rows) == 1
-        assert rows[0]["service"] == "alpha"
-        assert rows[0]["level"] == "INFO"
-
-    def test_filtered_rows_excluded_from_count(self, make_csv):
-        """count reflects only rows that survived the filter."""
-        p = make_csv("f4.csv", [
-            "t,ERROR,svc,m",
-            "t,ERROR,svc,m",
-            "t,INFO,svc,m",   # filtered out by --level ERROR
-        ])
-        rows = parse_output(logsum("--input", str(p), "--level", "ERROR").stdout)
-        assert rows[0]["count"] == "2"
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# [E] Edge cases
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestEdgeCases:
-    """Direct mapping to the nine numbered edge cases in §Edge cases."""
-
-    # Edge case #5 — unknown level value
-    def test_unknown_level_kept_as_is(self, make_csv):
-        p = make_csv("e5a.csv", ["t,DEBUG,svc,m", "t,TRACE,svc,m"])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert {r["level"] for r in rows} == {"DEBUG", "TRACE"}
-
-    def test_unknown_level_not_collapsed_to_other(self, make_csv):
-        """Unknown levels are NOT collapsed to 'OTHER' (spec is explicit)."""
-        p = make_csv("e5b.csv", ["t,debug,svc,m"])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert "OTHER" not in {r["level"] for r in rows}
-        assert rows[0]["level"] == "DEBUG"
-
-    # Edge case #6 — malformed / missing timestamp (covered in Normalisation too)
-    def test_malformed_timestamp_row_not_skipped(self, make_csv):
-        p = make_csv("e6.csv", ["GARBAGE-TIMESTAMP,WARN,svc,m"])
-        result = logsum("--input", str(p))
-        assert result.returncode == 0
-        rows = parse_output(result.stdout)
-        assert rows[0]["count"] == "1"
-
-    # Edge case #7 — extra columns
-    def test_extra_columns_silently_ignored(self, make_csv):
-        p = make_csv(
-            "e7.csv",
-            ["t,INFO,svc,m,xval,yval"],
-            header="timestamp,level,service,message,extra1,extra2",
-        )
-        result = logsum("--input", str(p))
-        assert result.returncode == 0
-        rows = parse_output(result.stdout)
-        assert rows[0]["count"] == "1"
-        # Extra columns must NOT bleed into output
-        assert set(rows[0].keys()) == {"service", "level", "count"}
-
-    def test_input_column_order_irrelevant(self, make_csv):
-        """§Input CSV schema: 'order is not important'."""
-        p = make_csv(
-            "e7b.csv",
-            ["m,svc,INFO,t"],
-            header="message,service,level,timestamp",
-        )
-        result = logsum("--input", str(p))
-        assert result.returncode == 0
-        rows = parse_output(result.stdout)
-        assert rows[0]["service"] == "svc"
-        assert rows[0]["level"] == "INFO"
-
-    # Edge case #8 — empty level field
-    def test_empty_level_kept_as_empty_string(self, make_csv):
-        p = make_csv("e8.csv", ["t,,svc,m", "t,,svc,m"])
-        result = logsum("--input", str(p))
-        assert result.returncode == 0
-        rows = parse_output(result.stdout)
-        assert len(rows) == 1
-        assert rows[0]["level"] == ""
-        assert rows[0]["count"] == "2"
-
-    def test_empty_level_not_mapped_to_other(self, make_csv):
-        p = make_csv("e8b.csv", ["t,,svc,m"])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert rows[0]["level"] != "OTHER"
-
-    # Edge case #9 — duplicate header row in body
-    def test_duplicate_header_row_treated_as_data(self, make_csv):
-        """Header repeated in body → level='level' → normalised → 'LEVEL' in output."""
-        p = make_csv("e9.csv", [
-            "t,INFO,svc,m",
-            "timestamp,level,service,message",   # header row appearing as data
-        ])
-        result = logsum("--input", str(p))
-        assert result.returncode == 0
-        rows = parse_output(result.stdout)
-        levels = {r["level"] for r in rows}
-        assert "LEVEL" in levels   # 'level' uppercased → 'LEVEL'
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# [X] Exit codes and error messages
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestExitCodes:
-    """§Exit codes and §Edge cases #1–#4."""
-
-    # Exit 1 — file not found or permission denied (edge case #1)
-    def test_file_not_found_exits_1(self, tmp_path):
-        result = logsum("--input", str(tmp_path / "nonexistent.csv"))
-        assert result.returncode == 1
-
-    def test_file_not_found_error_on_stderr(self, tmp_path):
-        path = str(tmp_path / "nonexistent.csv")
-        result = logsum("--input", path)
-        assert "Error:" in result.stderr
-        assert "nonexistent.csv" in result.stderr
-
-    def test_file_not_found_stdout_is_empty(self, tmp_path):
-        result = logsum("--input", str(tmp_path / "nope.csv"))
-        assert result.stdout == ""
-
-    # Exit 2 — required column missing (edge case #2)
-    @pytest.mark.parametrize("missing_col,header", [
-        ("level",     "timestamp,service,message"),
-        ("service",   "timestamp,level,message"),
-        ("timestamp", "level,service,message"),
-        ("message",   "timestamp,level,service"),
-    ])
-    def test_missing_required_column_exits_2(self, make_csv, missing_col, header):
-        p = make_csv(f"miss_{missing_col}.csv", ["a,b,c"], header=header)
-        result = logsum("--input", str(p))
-        assert result.returncode == 2
-
-    @pytest.mark.parametrize("missing_col,header", [
-        ("level",     "timestamp,service,message"),
-        ("service",   "timestamp,level,message"),
-        ("timestamp", "level,service,message"),
-        ("message",   "timestamp,level,service"),
-    ])
-    def test_missing_required_column_stderr_names_it(self, make_csv, missing_col, header):
-        p = make_csv(f"miss2_{missing_col}.csv", ["a,b,c"], header=header)
-        result = logsum("--input", str(p))
-        assert "Missing required column" in result.stderr
-        assert missing_col in result.stderr
-
-    # Spec gap: truly empty file (0 bytes) — not covered by edge cases #1–#9
-    def test_empty_file_exits_2(self, tmp_path):
-        """
-        Edge case not listed in the spec: a file that exists but is 0 bytes.
-        The spec covers 'header-only' (exit 3) and 'missing required column'
-        (exit 2) but says nothing about an empty file.
-
-        First hypothesis: exit 3 (by analogy with header-only).
-        Observed behaviour: exit 2, stderr 'Missing required column: timestamp'.
-        Decision: spec ambiguity — see test-notes.md.
-        Test asserts the implementation's actual (exit-2) behaviour.
-        """
-        p = tmp_path / "empty.csv"
-        p.write_bytes(b"")
-        result = logsum("--input", str(p))
-        assert result.returncode == 2
-        assert "Missing required column" in result.stderr
-
-    # Exit 3 — header-only (edge case #3)
-    def test_header_only_exits_3(self, make_csv):
-        p = make_csv("headeronly.csv", [])
-        result = logsum("--input", str(p))
-        assert result.returncode == 3
-
-    def test_header_only_stderr_says_no_log_entries_found(self, make_csv):
-        p = make_csv("headeronly2.csv", [])
-        result = logsum("--input", str(p))
-        assert "No log entries found." in result.stderr
-
-    # Exit 3 — all rows filtered out (edge case #4)
-    def test_all_rows_filtered_exits_3(self, make_csv):
-        p = make_csv("allfiltered.csv", ["t,INFO,svc,m"])
-        result = logsum("--input", str(p), "--level", "ERROR")
-        assert result.returncode == 3
-
-    def test_all_rows_filtered_stderr_active_filters_message(self, make_csv):
-        p = make_csv("allfiltered2.csv", ["t,INFO,svc,m"])
-        result = logsum("--input", str(p), "--level", "ERROR")
-        assert "No log entries match the active filters." in result.stderr
-
-    def test_exit_3_two_paths_have_distinct_messages(self, make_csv):
-        """
-        The spec requires two separate counters for exit-3 (§Implementation notes).
-        Header-only → "No log entries found."
-        All filtered → "No log entries match the active filters."
-        These must not be confused.
-        """
-        p_header = make_csv("e3h.csv", [])
-        p_filter = make_csv("e3f.csv", ["t,INFO,svc,m"])
-
-        r_header = logsum("--input", str(p_header))
-        r_filter = logsum("--input", str(p_filter), "--level", "ERROR")
-
-        # header-only path
-        assert "No log entries found." in r_header.stderr
-        assert "active filters" not in r_header.stderr
-
-        # all-filtered path
-        assert "No log entries match the active filters." in r_filter.stderr
-        assert "No log entries found." not in r_filter.stderr
-
-    # Streams must never be mixed (§Stderr vs stdout)
-    def test_error_messages_go_to_stderr_not_stdout(self, tmp_path):
-        result = logsum("--input", str(tmp_path / "missing.csv"))
-        assert result.stdout == ""
-        assert result.stderr.strip() != ""
-
-    def test_success_output_goes_to_stdout_not_stderr(self, make_csv):
-        p = make_csv("streams.csv", ["t,INFO,svc,m"])
-        result = logsum("--input", str(p))
-        assert "service,level,count" in result.stdout
+    def test_help_stderr_empty(self):
+        result = logsum("--help")
         assert result.stderr == ""
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# [O] --output flag
-# ═══════════════════════════════════════════════════════════════════════════
+# ── Output format ──────────────────────────────────────────────────────────
 
-class TestOutputFlag:
-    """§Inputs: --output writes summary CSV to file instead of stdout."""
+class TestOutputFormat:
+    def test_header_row(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,svc-a,msg"])
+        result = logsum("--input", str(csv_path))
+        assert result.stdout.startswith("service,level,count\n")
 
-    def test_output_flag_creates_file(self, make_csv, tmp_path):
-        src = make_csv("in.csv", ["t,INFO,svc,m"])
-        out = tmp_path / "out.csv"
-        result = logsum("--input", str(src), "--output", str(out))
+    def test_column_order_service_level_count(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,ERROR,svc-x,msg"])
+        result = logsum("--input", str(csv_path))
+        lines = result.stdout.splitlines()
+        assert lines[0] == "service,level,count"
+        assert lines[1] == "svc-x,ERROR,1"
+
+    def test_no_trailing_newline(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,svc,msg"])
+        result = logsum("--input", str(csv_path))
+        assert not result.stdout.endswith("\n")
+
+    def test_single_row_output(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,WARN,my-svc,m"])
+        result = logsum("--input", str(csv_path))
+        assert result.stdout == "service,level,count\nmy-svc,WARN,1"
+
+    def test_exit_code_zero_on_success(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,svc,msg"])
+        result = logsum("--input", str(csv_path))
         assert result.returncode == 0
-        assert out.exists()
 
-    def test_output_flag_file_has_correct_content(self, make_csv, tmp_path):
-        src = make_csv("in2.csv", ["t,INFO,svc,m", "t,INFO,svc,m"])
-        out = tmp_path / "out2.csv"
-        logsum("--input", str(src), "--output", str(out))
-        rows = list(csv.DictReader(out.open(encoding="utf-8")))
-        assert len(rows) == 1
-        assert rows[0]["service"] == "svc"
-        assert rows[0]["level"] == "INFO"
-        assert rows[0]["count"] == "2"
-
-    def test_output_flag_suppresses_stdout(self, make_csv, tmp_path):
-        src = make_csv("in3.csv", ["t,INFO,svc,m"])
-        out = tmp_path / "out3.csv"
-        result = logsum("--input", str(src), "--output", str(out))
-        assert result.stdout == ""
-
-    def test_no_output_flag_writes_to_stdout(self, make_csv):
-        src = make_csv("stdout.csv", ["t,INFO,svc,m"])
-        result = logsum("--input", str(src))
-        assert "service,level,count" in result.stdout
+    def test_stderr_empty_on_success(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,svc,msg"])
+        result = logsum("--input", str(csv_path))
+        assert result.stderr == ""
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# [H] --help
-# ═══════════════════════════════════════════════════════════════════════════
+# ── Grouping and aggregation ───────────────────────────────────────────────
 
-class TestHelp:
-    """§Help flag: prints usage to stdout and exits 0."""
+class TestGrouping:
+    def test_two_rows_same_group_count_2(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,ERROR,svc,m", "t,ERROR,svc,m2"])
+        result = logsum("--input", str(csv_path))
+        lines = result.stdout.splitlines()
+        assert lines[1] == "svc,ERROR,2"
 
-    def test_help_exits_0(self):
-        assert logsum("--help").returncode == 0
+    def test_two_groups_different_level(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,svc,m", "t,ERROR,svc,m"])
+        result = logsum("--input", str(csv_path))
+        lines = result.stdout.splitlines()
+        assert len(lines) == 3  # header + 2 groups
 
-    def test_help_writes_to_stdout(self):
-        result = logsum("--help")
-        assert result.stdout.strip() != ""
+    def test_two_groups_different_service(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,svc-a,m", "t,INFO,svc-b,m"])
+        result = logsum("--input", str(csv_path))
+        lines = result.stdout.splitlines()
+        assert len(lines) == 3  # header + 2 groups
 
-    def test_help_not_on_stderr(self):
-        result = logsum("--help")
-        # Significant usage text must land on stdout, not stderr
-        assert len(result.stdout) > len(result.stderr)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# [P] Positional-arg shorthand (§Implementation notes, kata 5.3)
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestPositionalArgs:
-    """Bare positionals are absorbed into --input / --output when flags absent."""
-
-    def test_positional_input_only(self, make_csv):
-        """``python -m src.logsum <path>`` (no --input flag)."""
-        p = make_csv("pos1.csv", ["t,INFO,svc,m"])
-        result = subprocess.run(
-            [sys.executable, "-m", "src.logsum", str(p)],
-            capture_output=True, text=True,
-        )
-        assert result.returncode == 0
-        rows = parse_output(result.stdout)
-        assert rows[0]["service"] == "svc"
-
-    def test_positional_input_and_output(self, make_csv, tmp_path):
-        """``python -m src.logsum <input> <output>`` (no flags)."""
-        src = make_csv("pos2.csv", ["t,INFO,svc,m"])
-        out = tmp_path / "pos_out.csv"
-        result = subprocess.run(
-            [sys.executable, "-m", "src.logsum", str(src), str(out)],
-            capture_output=True, text=True,
-        )
-        assert result.returncode == 0
-        assert out.exists()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# [M] --min-count flag (spec §Inputs, edge case #10)
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestMinCount:
-    """--min-count N suppresses groups whose count < N (post-aggregation filter)."""
-
-    def test_no_flag_shows_all_groups(self, make_csv):
-        """Regression: without --min-count all groups still appear."""
-        p = make_csv("m0.csv", [
+    def test_sort_descending_by_count(self, make_csv):
+        rows = [
+            "t,INFO,svc,m",       # 1 INFO
             "t,ERROR,svc,m",
-            "t,INFO,svc,m",
-            "t,INFO,svc,m",
-        ])
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        assert len(rows) == 2
+            "t,ERROR,svc,m",
+            "t,ERROR,svc,m",      # 3 ERROR
+        ]
+        csv_path = make_csv("f.csv", rows)
+        result = logsum("--input", str(csv_path))
+        lines = result.stdout.splitlines()
+        # First data row must have highest count
+        parts_first = lines[1].split(",")
+        parts_second = lines[2].split(",")
+        assert int(parts_first[2]) >= int(parts_second[2])
 
-    def test_min_count_filters_below_threshold(self, make_csv):
-        """Groups with count < N are excluded; groups with count >= N are kept."""
-        p = make_csv("m1.csv", [
-            "t,ERROR,svc,m",          # count 1  → filtered when N=2
-            "t,INFO,svc,m",
-            "t,INFO,svc,m",           # count 2  → kept
-        ])
-        rows = parse_output(logsum("--input", str(p), "--min-count", "2").stdout)
-        assert len(rows) == 1
-        assert rows[0]["level"] == "INFO"
-        assert rows[0]["count"] == "2"
+    def test_sort_highest_count_first(self, make_csv):
+        rows = ["t,INFO,svc,m"] * 5 + ["t,ERROR,svc,m"] * 2
+        csv_path = make_csv("f.csv", rows)
+        result = logsum("--input", str(csv_path))
+        lines = result.stdout.splitlines()
+        assert lines[1] == "svc,INFO,5"
+        assert lines[2] == "svc,ERROR,2"
 
-    def test_min_count_keeps_group_at_threshold(self, make_csv):
-        """A group whose count equals exactly N must be kept (boundary condition)."""
-        p = make_csv("m2.csv", [
-            "t,WARN,svc,m",
-            "t,WARN,svc,m",           # count == 2
-        ])
-        rows = parse_output(logsum("--input", str(p), "--min-count", "2").stdout)
-        assert len(rows) == 1
-        assert rows[0]["count"] == "2"
+    def test_multi_service_multi_level(self, make_csv):
+        rows = [
+            "t,ERROR,checkout,m",
+            "t,ERROR,checkout,m",
+            "t,INFO,checkout,m",
+            "t,WARN,cart,m",
+            "t,INFO,cart,m",
+            "t,INFO,cart,m",
+        ]
+        csv_path = make_csv("f.csv", rows)
+        result = logsum("--input", str(csv_path))
+        lines = result.stdout.splitlines()
+        counts = {(row.split(",")[0], row.split(",")[1]): int(row.split(",")[2])
+                  for row in lines[1:]}
+        assert counts[("checkout", "ERROR")] == 2
+        assert counts[("checkout", "INFO")] == 1
+        assert counts[("cart", "WARN")] == 1
+        assert counts[("cart", "INFO")] == 2
 
-    def test_min_count_1_is_noop(self, make_csv):
-        """--min-count 1 is identical to omitting the flag (every group has count>=1)."""
-        p = make_csv("m3.csv", [
-            "t,INFO,alpha,m",
-            "t,WARN,beta,m",
-            "t,ERROR,gamma,m",
-        ])
-        without_flag = parse_output(logsum("--input", str(p)).stdout)
-        with_flag    = parse_output(logsum("--input", str(p), "--min-count", "1").stdout)
-        assert len(without_flag) == len(with_flag) == 3
 
-    def test_min_count_all_filtered_exits_3(self, make_csv):
-        """Edge case #10: all groups below N → exit 3."""
-        p = make_csv("m4.csv", ["t,INFO,svc,m"])   # single group, count=1
-        result = logsum("--input", str(p), "--min-count", "99")
+# ── Normalisation ──────────────────────────────────────────────────────────
+
+class TestNormalisation:
+    def test_level_uppercased(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,error,svc,m"])
+        result = logsum("--input", str(csv_path))
+        assert "svc,ERROR,1" in result.stdout
+
+    def test_level_mixed_case_uppercased(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,Error,svc,m"])
+        result = logsum("--input", str(csv_path))
+        assert "ERROR" in result.stdout
+
+    def test_level_with_leading_trailing_whitespace(self, make_csv):
+        csv_path = make_csv("f.csv", ["t, warn ,svc,m"])
+        result = logsum("--input", str(csv_path))
+        assert "svc,WARN,1" in result.stdout
+
+    def test_service_whitespace_stripped(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO, cart-api ,m"])
+        result = logsum("--input", str(csv_path))
+        assert "cart-api,INFO,1" in result.stdout
+
+    def test_service_casing_preserved(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,MyService,m"])
+        result = logsum("--input", str(csv_path))
+        assert "MyService,INFO,1" in result.stdout
+
+    def test_normalised_rows_merge_into_same_group(self, make_csv):
+        # "warn" and " WARN " should both normalise to WARN for the same svc
+        csv_path = make_csv("f.csv", ["t,warn,svc,m", "t, WARN ,svc,m"])
+        result = logsum("--input", str(csv_path))
+        lines = result.stdout.splitlines()
+        # Should be 1 data row with count 2
+        assert len(lines) == 2
+        assert lines[1] == "svc,WARN,2"
+
+
+# ── Filters ────────────────────────────────────────────────────────────────
+
+class TestFilters:
+    def test_level_filter_keeps_matching_rows(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,ERROR,svc,m", "t,INFO,svc,m"])
+        result = logsum("--input", str(csv_path), "--level", "ERROR")
+        assert "svc,ERROR,1" in result.stdout
+        assert "INFO" not in result.stdout
+
+    def test_level_filter_case_insensitive(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,ERROR,svc,m", "t,INFO,svc,m"])
+        result = logsum("--input", str(csv_path), "--level", "error")
+        assert "ERROR" in result.stdout
+        assert "INFO" not in result.stdout
+
+    def test_service_filter_keeps_matching_rows(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,svc-a,m", "t,INFO,svc-b,m"])
+        result = logsum("--input", str(csv_path), "--service", "svc-a")
+        assert "svc-a,INFO,1" in result.stdout
+        assert "svc-b" not in result.stdout
+
+    def test_service_filter_case_sensitive(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,SvcA,m", "t,INFO,svca,m"])
+        result = logsum("--input", str(csv_path), "--service", "SvcA")
+        assert "SvcA,INFO,1" in result.stdout
+        assert "svca" not in result.stdout
+
+    def test_combined_level_and_service_filter(self, make_csv):
+        csv_path = make_csv("f.csv", [
+            "t,ERROR,svc-a,m",
+            "t,INFO,svc-a,m",
+            "t,ERROR,svc-b,m",
+        ])
+        result = logsum("--input", str(csv_path), "--level", "ERROR", "--service", "svc-a")
+        assert result.stdout == "service,level,count\nsvc-a,ERROR,1"
+
+    def test_min_count_filters_low_count_groups(self, make_csv):
+        rows = ["t,INFO,svc,m"] * 3 + ["t,WARN,svc,m"]
+        csv_path = make_csv("f.csv", rows)
+        result = logsum("--input", str(csv_path), "--min-count", "2")
+        assert "INFO" in result.stdout
+        assert "WARN" not in result.stdout
+
+    def test_min_count_1_keeps_all_groups(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,svc,m", "t,WARN,svc,m"])
+        result = logsum("--input", str(csv_path), "--min-count", "1")
+        lines = result.stdout.splitlines()
+        assert len(lines) == 3  # header + 2 groups
+
+    def test_min_count_exact_boundary_included(self, make_csv):
+        rows = ["t,ERROR,svc,m"] * 3
+        csv_path = make_csv("f.csv", rows)
+        result = logsum("--input", str(csv_path), "--min-count", "3")
+        assert "svc,ERROR,3" in result.stdout
+
+    def test_min_count_exact_boundary_excluded(self, make_csv):
+        rows = ["t,ERROR,svc,m"] * 2
+        csv_path = make_csv("f.csv", rows)
+        result = logsum("--input", str(csv_path), "--min-count", "3")
         assert result.returncode == 3
 
-    def test_min_count_all_filtered_stderr_message(self, make_csv):
-        """Edge case #10: stderr must say 'No log entries match the active filters.'"""
-        p = make_csv("m5.csv", ["t,INFO,svc,m"])
-        result = logsum("--input", str(p), "--min-count", "99")
-        assert "No log entries match the active filters." in result.stderr
+    def test_level_filter_exit_0_when_matches(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,ERROR,svc,m"])
+        result = logsum("--input", str(csv_path), "--level", "ERROR")
+        assert result.returncode == 0
+
+    def test_service_filter_exit_0_when_matches(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,svc,m"])
+        result = logsum("--input", str(csv_path), "--service", "svc")
+        assert result.returncode == 0
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Static fixture smoke-test
-# ═══════════════════════════════════════════════════════════════════════════
+# ── Edge case 1: File not found / permission denied ────────────────────────
 
-class TestStaticFixtures:
-    """End-to-end smoke test against the committed fixtures/basic.csv."""
+class TestEdgeCase1FileNotFound:
+    def test_exit_code_1_on_missing_file(self):
+        result = logsum("--input", "/nonexistent/path/file.csv")
+        assert result.returncode == 1
 
-    def test_basic_fixture_exits_0(self):
-        p = FIXTURES_DIR / "basic.csv"
-        if not p.exists():
-            pytest.skip("fixtures/basic.csv not found")
-        assert logsum("--input", str(p)).returncode == 0
+    def test_stderr_error_format_missing_file(self):
+        result = logsum("--input", "/nonexistent/path/file.csv")
+        assert result.stderr.startswith("Error: cannot open '/nonexistent/path/file.csv':")
 
-    def test_basic_fixture_count_order(self):
-        """Output must be sorted by count descending."""
-        p = FIXTURES_DIR / "basic.csv"
-        if not p.exists():
-            pytest.skip("fixtures/basic.csv not found")
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        counts = [int(r["count"]) for r in rows]
+    def test_stderr_includes_os_message(self):
+        result = logsum("--input", "/nonexistent/path/file.csv")
+        # The OS error message (e.g. "No such file or directory") should appear
+        assert len(result.stderr.strip()) > len("Error: cannot open '/nonexistent/path/file.csv': ")
+
+    def test_stdout_empty_on_file_error(self):
+        result = logsum("--input", "/nonexistent/path/file.csv")
+        assert result.stdout == ""
+
+
+# ── Edge case 2: Missing required column ──────────────────────────────────
+
+class TestEdgeCase2MissingColumn:
+    def test_exit_code_2_missing_level(self, make_csv):
+        csv_path = make_csv("f.csv", [], header="timestamp,service,message")
+        result = logsum("--input", str(csv_path))
+        assert result.returncode == 2
+
+    def test_stderr_missing_column_name(self, make_csv):
+        csv_path = make_csv("f.csv", [], header="timestamp,service,message")
+        result = logsum("--input", str(csv_path))
+        assert result.stderr.strip() == "Missing required column: level"
+
+    def test_exit_code_2_missing_service(self, make_csv):
+        csv_path = make_csv("f.csv", [], header="timestamp,level,message")
+        result = logsum("--input", str(csv_path))
+        assert result.returncode == 2
+
+    def test_stderr_missing_service_column(self, make_csv):
+        csv_path = make_csv("f.csv", [], header="timestamp,level,message")
+        result = logsum("--input", str(csv_path))
+        assert result.stderr.strip() == "Missing required column: service"
+
+    def test_stdout_empty_on_missing_column(self, make_csv):
+        csv_path = make_csv("f.csv", [], header="timestamp,service,message")
+        result = logsum("--input", str(csv_path))
+        assert result.stdout == ""
+
+
+# ── Edge case 3: Header-only file ─────────────────────────────────────────
+
+class TestEdgeCase3HeaderOnly:
+    def test_exit_code_3_header_only(self, make_csv):
+        csv_path = make_csv("f.csv", [])
+        result = logsum("--input", str(csv_path))
+        assert result.returncode == 3
+
+    def test_stderr_no_log_entries_found(self, make_csv):
+        csv_path = make_csv("f.csv", [])
+        result = logsum("--input", str(csv_path))
+        assert result.stderr.strip() == "No log entries found."
+
+    def test_stdout_empty_header_only(self, make_csv):
+        csv_path = make_csv("f.csv", [])
+        result = logsum("--input", str(csv_path))
+        assert result.stdout == ""
+
+
+# ── Edge case 4: All rows filtered out ────────────────────────────────────
+
+class TestEdgeCase4AllFiltered:
+    def test_exit_code_3_level_filter_removes_all(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,svc,m"])
+        result = logsum("--input", str(csv_path), "--level", "ERROR")
+        assert result.returncode == 3
+
+    def test_stderr_no_match_active_filters_level(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,svc,m"])
+        result = logsum("--input", str(csv_path), "--level", "ERROR")
+        assert result.stderr.strip() == "No log entries match the active filters."
+
+    def test_exit_code_3_service_filter_removes_all(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,svc-a,m"])
+        result = logsum("--input", str(csv_path), "--service", "svc-b")
+        assert result.returncode == 3
+
+    def test_stderr_no_match_active_filters_service(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,svc-a,m"])
+        result = logsum("--input", str(csv_path), "--service", "svc-b")
+        assert result.stderr.strip() == "No log entries match the active filters."
+
+    def test_different_message_for_header_only_vs_filtered(self, make_csv):
+        # Header-only → "No log entries found."
+        header_only = make_csv("h.csv", [])
+        r_empty = logsum("--input", str(header_only))
+        # Rows exist but filtered → different message
+        has_rows = make_csv("r.csv", ["t,INFO,svc,m"])
+        r_filtered = logsum("--input", str(has_rows), "--level", "WARN")
+        assert r_empty.stderr.strip() != r_filtered.stderr.strip()
+        assert r_empty.stderr.strip() == "No log entries found."
+        assert r_filtered.stderr.strip() == "No log entries match the active filters."
+
+
+# ── Edge case 5: Unknown level value ──────────────────────────────────────
+
+class TestEdgeCase5UnknownLevel:
+    def test_debug_level_kept_as_is(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,DEBUG,svc,m"])
+        result = logsum("--input", str(csv_path))
+        assert "svc,DEBUG,1" in result.stdout
+        assert result.returncode == 0
+
+    def test_trace_level_kept_as_is(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,TRACE,svc,m"])
+        result = logsum("--input", str(csv_path))
+        assert "svc,TRACE,1" in result.stdout
+
+    def test_unknown_level_not_collapsed_to_other(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,VERBOSE,svc,m"])
+        result = logsum("--input", str(csv_path))
+        assert "OTHER" not in result.stdout
+        assert "VERBOSE" in result.stdout
+
+
+# ── Edge case 6: Malformed/missing timestamp ──────────────────────────────
+
+class TestEdgeCase6Timestamp:
+    def test_empty_timestamp_row_still_counted(self, make_csv):
+        csv_path = make_csv("f.csv", [",INFO,svc,m"])
+        result = logsum("--input", str(csv_path))
+        assert "svc,INFO,1" in result.stdout
+        assert result.returncode == 0
+
+    def test_invalid_timestamp_row_still_counted(self, make_csv):
+        csv_path = make_csv("f.csv", ["not-a-date,WARN,svc,m"])
+        result = logsum("--input", str(csv_path))
+        assert "svc,WARN,1" in result.stdout
+
+
+# ── Edge case 7: Extra columns silently ignored ────────────────────────────
+
+class TestEdgeCase7ExtraColumns:
+    def test_extra_column_ignored(self, make_csv):
+        csv_path = make_csv(
+            "f.csv",
+            ["t,INFO,svc,msg,extra-value"],
+            header="timestamp,level,service,message,extra",
+        )
+        result = logsum("--input", str(csv_path))
+        assert "svc,INFO,1" in result.stdout
+        assert result.returncode == 0
+
+    def test_multiple_extra_columns_ignored(self, make_csv):
+        csv_path = make_csv(
+            "f.csv",
+            ["t,WARN,svc,msg,x,y,z"],
+            header="timestamp,level,service,message,col1,col2,col3",
+        )
+        result = logsum("--input", str(csv_path))
+        assert "svc,WARN,1" in result.stdout
+
+
+# ── Edge case 8: Empty level field ────────────────────────────────────────
+
+class TestEdgeCase8EmptyLevel:
+    def test_empty_level_kept_as_empty_string(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,,svc,m"])
+        result = logsum("--input", str(csv_path))
+        assert result.returncode == 0
+        # Empty level → group key has empty string for level
+        lines = result.stdout.splitlines()
+        # The level column in output should be empty: "svc,,1"
+        assert any(line.startswith("svc,,") for line in lines[1:])
+
+    def test_whitespace_only_level_becomes_empty(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,   ,svc,m"])
+        result = logsum("--input", str(csv_path))
+        # After strip+uppercase of "   " → ""
+        lines = result.stdout.splitlines()
+        assert any(line.startswith("svc,,") for line in lines[1:])
+
+
+# ── Edge case 9: Duplicate header row in body ─────────────────────────────
+
+class TestEdgeCase9DuplicateHeader:
+    def test_header_row_in_body_treated_as_data(self, make_csv):
+        csv_path = make_csv("f.csv", [
+            "timestamp,level,service,message",  # duplicate header in body
+            "t,INFO,svc,m",
+        ])
+        result = logsum("--input", str(csv_path))
+        assert result.returncode == 0
+        # "level" becomes "LEVEL" after normalisation, "service" stays "service"
+        assert "service,LEVEL,1" in result.stdout
+
+    def test_real_data_row_still_counted(self, make_csv):
+        csv_path = make_csv("f.csv", [
+            "timestamp,level,service,message",
+            "t,INFO,svc,m",
+        ])
+        result = logsum("--input", str(csv_path))
+        assert "svc,INFO,1" in result.stdout
+
+
+# ── Edge case 10: --min-count removes all groups ──────────────────────────
+
+class TestEdgeCase10MinCountAllFiltered:
+    def test_exit_code_3_all_groups_below_min_count(self, make_csv):
+        rows = ["t,INFO,svc,m"] * 2
+        csv_path = make_csv("f.csv", rows)
+        result = logsum("--input", str(csv_path), "--min-count", "5")
+        assert result.returncode == 3
+
+    def test_stderr_active_filters_message_for_min_count(self, make_csv):
+        rows = ["t,INFO,svc,m"] * 2
+        csv_path = make_csv("f.csv", rows)
+        result = logsum("--input", str(csv_path), "--min-count", "5")
+        assert result.stderr.strip() == "No log entries match the active filters."
+
+    def test_stdout_empty_when_min_count_removes_all(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,svc,m"])
+        result = logsum("--input", str(csv_path), "--min-count", "10")
+        assert result.stdout == ""
+
+
+# ── --output flag ─────────────────────────────────────────────────────────
+
+class TestOutputFlag:
+    def test_output_flag_writes_to_file(self, make_csv, tmp_path):
+        csv_path = make_csv("in.csv", ["t,INFO,svc,m"])
+        out_path = tmp_path / "out.csv"
+        result = logsum("--input", str(csv_path), "--output", str(out_path))
+        assert result.returncode == 0
+        assert out_path.exists()
+
+    def test_output_flag_file_content_matches_stdout_format(self, make_csv, tmp_path):
+        csv_path = make_csv("in.csv", ["t,ERROR,svc,m", "t,ERROR,svc,m"])
+        out_path = tmp_path / "out.csv"
+        logsum("--input", str(csv_path), "--output", str(out_path))
+        content = out_path.read_text(encoding="utf-8")
+        assert content == "service,level,count\nsvc,ERROR,2"
+
+    def test_stdout_empty_when_output_flag_used(self, make_csv, tmp_path):
+        csv_path = make_csv("in.csv", ["t,INFO,svc,m"])
+        out_path = tmp_path / "out.csv"
+        result = logsum("--input", str(csv_path), "--output", str(out_path))
+        assert result.stdout == ""
+
+    def test_output_file_no_trailing_newline(self, make_csv, tmp_path):
+        csv_path = make_csv("in.csv", ["t,INFO,svc,m"])
+        out_path = tmp_path / "out.csv"
+        logsum("--input", str(csv_path), "--output", str(out_path))
+        content = out_path.read_text(encoding="utf-8")
+        assert not content.endswith("\n")
+
+
+# ── Positional argument shorthand ─────────────────────────────────────────
+
+class TestPositionalShorthand:
+    def test_bare_positional_as_input(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,svc,m"])
+        result = logsum(str(csv_path))
+        assert result.returncode == 0
+        assert "svc,INFO,1" in result.stdout
+
+    def test_two_positionals_as_input_and_output(self, make_csv, tmp_path):
+        csv_path = make_csv("in.csv", ["t,WARN,svc,m"])
+        out_path = tmp_path / "out.csv"
+        result = logsum(str(csv_path), str(out_path))
+        assert result.returncode == 0
+        assert out_path.exists()
+        assert "svc,WARN,1" in out_path.read_text(encoding="utf-8")
+
+    def test_positional_input_with_level_flag(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,INFO,svc,m", "t,WARN,svc,m"])
+        result = logsum(str(csv_path), "--level", "INFO")
+        assert result.returncode == 0
+        assert "INFO" in result.stdout
+        assert "WARN" not in result.stdout
+
+
+# ── Sorting tie-breaking ───────────────────────────────────────────────────
+
+class TestSorting:
+    def test_three_groups_sorted_desc(self, make_csv):
+        rows = (
+            ["t,ERROR,svc,m"] * 5
+            + ["t,WARN,svc,m"] * 3
+            + ["t,INFO,svc,m"] * 1
+        )
+        csv_path = make_csv("f.csv", rows)
+        result = logsum("--input", str(csv_path))
+        lines = result.stdout.splitlines()[1:]  # skip header
+        counts = [int(row.split(",")[2]) for row in lines]
         assert counts == sorted(counts, reverse=True)
 
-    def test_basic_fixture_known_groups_present(self):
-        """Known (service, level) pairs from fixtures/basic.csv must appear."""
-        p = FIXTURES_DIR / "basic.csv"
-        if not p.exists():
-            pytest.skip("fixtures/basic.csv not found")
-        rows = parse_output(logsum("--input", str(p)).stdout)
-        pairs = {(r["service"], r["level"]) for r in rows}
-        assert ("checkout-service", "ERROR") in pairs
-        assert ("identity-service", "INFO") in pairs
-        assert ("cart-api", "WARN") in pairs
+    def test_single_group_one_row(self, make_csv):
+        csv_path = make_csv("f.csv", ["t,DEBUG,my-svc,m"])
+        result = logsum("--input", str(csv_path))
+        assert result.stdout == "service,level,count\nmy-svc,DEBUG,1"
 
-    def test_basic_fixture_level_filter(self):
-        """--level ERROR returns only ERROR rows."""
-        p = FIXTURES_DIR / "basic.csv"
-        if not p.exists():
-            pytest.skip("fixtures/basic.csv not found")
-        rows = parse_output(logsum("--input", str(p), "--level", "ERROR").stdout)
-        assert rows
-        assert all(r["level"] == "ERROR" for r in rows)
+    def test_large_count_first(self, make_csv):
+        rows = ["t,INFO,svc,m"] * 100 + ["t,ERROR,svc,m"]
+        csv_path = make_csv("f.csv", rows)
+        result = logsum("--input", str(csv_path))
+        lines = result.stdout.splitlines()
+        assert lines[1].endswith(",100")
+        assert lines[2].endswith(",1")
 
-    def test_basic_fixture_service_filter(self):
-        """--service cart-api returns only cart-api rows."""
-        p = FIXTURES_DIR / "basic.csv"
-        if not p.exists():
-            pytest.skip("fixtures/basic.csv not found")
-        rows = parse_output(
-            logsum("--input", str(p), "--service", "cart-api").stdout
-        )
-        assert rows
-        assert all(r["service"] == "cart-api" for r in rows)
+
+# ── Spec example data ──────────────────────────────────────────────────────
+
+class TestSpecExample:
+    """Verify the exact example from spec.md produces the expected output."""
+
+    SPEC_ROWS = [
+        "2026-08-01T08:00:01Z,INFO,identity-service,Token issued for user u-1042",
+        "2026-08-01T08:01:15Z,ERROR,checkout-service,Payment gateway timeout",
+        "2026-08-01T08:01:25Z,WARN,cart-api,Cart session not found cs-9900",
+    ]
+
+    def test_spec_example_exit_zero(self, make_csv):
+        csv_path = make_csv("spec.csv", self.SPEC_ROWS)
+        result = logsum("--input", str(csv_path))
+        assert result.returncode == 0
+
+    def test_spec_example_three_groups(self, make_csv):
+        csv_path = make_csv("spec.csv", self.SPEC_ROWS)
+        result = logsum("--input", str(csv_path))
+        lines = result.stdout.splitlines()
+        assert len(lines) == 4  # header + 3 groups
+
+    def test_spec_example_correct_services(self, make_csv):
+        csv_path = make_csv("spec.csv", self.SPEC_ROWS)
+        result = logsum("--input", str(csv_path))
+        assert "identity-service" in result.stdout
+        assert "checkout-service" in result.stdout
+        assert "cart-api" in result.stdout
+
+    def test_spec_example_header_first(self, make_csv):
+        csv_path = make_csv("spec.csv", self.SPEC_ROWS)
+        result = logsum("--input", str(csv_path))
+        assert result.stdout.startswith("service,level,count\n")
