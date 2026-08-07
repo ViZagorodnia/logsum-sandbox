@@ -23,6 +23,7 @@ generating the most errors without requiring a log-aggregation platform.
 | `--output` | path | no | stdout | Write summary CSV here instead of stdout |
 | `--level` | string | no | all | Pre-filter rows to a single level before grouping |
 | `--service` | string | no | all | Pre-filter rows to a single service before grouping |
+| `--min-count` | int | no | — | Only output groups whose count is >= N (post-aggregation filter) |
 
 ### Input CSV schema
 
@@ -124,13 +125,14 @@ Rows excluded by `--level` or `--service` filters are not counted.
 | 7 | Extra columns in the CSV | Silently ignored |
 | 8 | Empty `level` field (blank string after normalisation) | Treated as unknown level; kept as empty string `""` in output |
 | 9 | Duplicate header row in body | Treated as a data row; `level = "level"` will appear in output |
+| 10 | All groups have count < N (--min-count N) | Exit 3; stderr: `No log entries match the active filters.` |
 
 ---
 
 ## CLI
 
 ```
-logsum --input <path> [--output <path>] [--level <LEVEL>] [--service <name>]
+logsum --input <path> [--output <path>] [--level <LEVEL>] [--service <name>] [--min-count N]
 ```
 
 ### Exit codes

@@ -606,6 +606,69 @@ class TestPositionalArgs:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# [M] --min-count flag (spec §Inputs, edge case #10)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestMinCount:
+    """--min-count N suppresses groups whose count < N (post-aggregation filter)."""
+
+    def test_no_flag_shows_all_groups(self, make_csv):
+        """Regression: without --min-count all groups still appear."""
+        p = make_csv("m0.csv", [
+            "t,ERROR,svc,m",
+            "t,INFO,svc,m",
+            "t,INFO,svc,m",
+        ])
+        rows = parse_output(logsum("--input", str(p)).stdout)
+        assert len(rows) == 2
+
+    def test_min_count_filters_below_threshold(self, make_csv):
+        """Groups with count < N are excluded; groups with count >= N are kept."""
+        p = make_csv("m1.csv", [
+            "t,ERROR,svc,m",          # count 1  → filtered when N=2
+            "t,INFO,svc,m",
+            "t,INFO,svc,m",           # count 2  → kept
+        ])
+        rows = parse_output(logsum("--input", str(p), "--min-count", "2").stdout)
+        assert len(rows) == 1
+        assert rows[0]["level"] == "INFO"
+        assert rows[0]["count"] == "2"
+
+    def test_min_count_keeps_group_at_threshold(self, make_csv):
+        """A group whose count equals exactly N must be kept (boundary condition)."""
+        p = make_csv("m2.csv", [
+            "t,WARN,svc,m",
+            "t,WARN,svc,m",           # count == 2
+        ])
+        rows = parse_output(logsum("--input", str(p), "--min-count", "2").stdout)
+        assert len(rows) == 1
+        assert rows[0]["count"] == "2"
+
+    def test_min_count_1_is_noop(self, make_csv):
+        """--min-count 1 is identical to omitting the flag (every group has count>=1)."""
+        p = make_csv("m3.csv", [
+            "t,INFO,alpha,m",
+            "t,WARN,beta,m",
+            "t,ERROR,gamma,m",
+        ])
+        without_flag = parse_output(logsum("--input", str(p)).stdout)
+        with_flag    = parse_output(logsum("--input", str(p), "--min-count", "1").stdout)
+        assert len(without_flag) == len(with_flag) == 3
+
+    def test_min_count_all_filtered_exits_3(self, make_csv):
+        """Edge case #10: all groups below N → exit 3."""
+        p = make_csv("m4.csv", ["t,INFO,svc,m"])   # single group, count=1
+        result = logsum("--input", str(p), "--min-count", "99")
+        assert result.returncode == 3
+
+    def test_min_count_all_filtered_stderr_message(self, make_csv):
+        """Edge case #10: stderr must say 'No log entries match the active filters.'"""
+        p = make_csv("m5.csv", ["t,INFO,svc,m"])
+        result = logsum("--input", str(p), "--min-count", "99")
+        assert "No log entries match the active filters." in result.stderr
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Static fixture smoke-test
 # ═══════════════════════════════════════════════════════════════════════════
 

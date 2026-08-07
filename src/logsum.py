@@ -58,6 +58,13 @@ def _make_parser() -> argparse.ArgumentParser:
         default=None,
         help="Pre-filter rows to a single service name before grouping",
     )
+    p.add_argument(
+        "--min-count",
+        metavar="N",
+        type=int,
+        default=None,
+        help="Only output groups whose count is >= N",
+    )
     # Hidden positional shorthand: logsum INPUT [OUTPUT]
     p.add_argument("positional_args", nargs="*", help=argparse.SUPPRESS)
     return p
@@ -166,6 +173,7 @@ def summarise(
     output_path: str | None,
     level_filter: str | None,
     service_filter: str | None,
+    min_count: int | None = None,
 ) -> None:
     """Read input CSV, aggregate, write summary CSV.  Exits on any error."""
     level_filter_norm = _norm_level(level_filter) if level_filter is not None else None
@@ -199,6 +207,12 @@ def summarise(
 
     sorted_groups = sorted(counts.items(), key=lambda kv: -kv[1])
 
+    if min_count is not None:
+        sorted_groups = [kv for kv in sorted_groups if kv[1] >= min_count]
+        if not sorted_groups:
+            print("No log entries match the active filters.", file=sys.stderr)
+            sys.exit(3)
+
     if output_path is None:
         # Stdout: buffer to avoid mixing with any deferred error text
         buf = io.StringIO()
@@ -227,6 +241,7 @@ def main(argv: list[str] | None = None) -> None:
         output_path=args.output,
         level_filter=args.level,
         service_filter=args.service,
+        min_count=args.min_count,
     )
 
 
