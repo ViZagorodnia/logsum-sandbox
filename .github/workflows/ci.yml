@@ -25,3 +25,16 @@ jobs:
 
       - name: Test — pytest
         run: pytest -v
+
+  test-deletion-guard:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check test file deletions
+        run: bash scripts/ci/test-deletion-guard.sh
