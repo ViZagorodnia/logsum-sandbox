@@ -1,0 +1,58 @@
+# NFR budget — logsum-multitenant
+# Each entry: target (numeric), unit, measurement_method
+# Intended for CI gate alignment (kata 5.D.3 pattern)
+
+latency_p95_small:
+  target: 300
+  unit: ms
+  condition: "file size <= 1 MB"
+  measurement_method: "locust load test, 20 req/s sustained, p95 from histogram"
+
+latency_p99_large:
+  target: 800
+  unit: ms
+  condition: "file size <= 8 MB"
+  measurement_method: "locust load test, 5 req/s sustained, p99 from histogram"
+
+max_payload_inbound:
+  target: 8
+  unit: MB
+  measurement_method: "unit test: POST 8MB+1B body; assert 413 before any CSV parse"
+
+max_response_body:
+  target: 512
+  unit: KB
+  measurement_method: "unit test: largest valid CSV; assert len(response.content) <= 524288"
+
+throughput_per_worker:
+  target: 20
+  unit: req/s
+  condition: "1 MB files, single worker process"
+  measurement_method: "locust sustained 60s run; assert actual_rps >= 20"
+
+error_rate_4xx_normal_load:
+  target: 0.1
+  unit: percent
+  condition: "valid requests under normal load"
+  measurement_method: "locust run; assert (4xx_count / total_requests) * 100 < 0.1"
+
+error_rate_5xx_normal_load:
+  target: 0.01
+  unit: percent
+  condition: "valid requests under normal load"
+  measurement_method: "locust run; assert (5xx_count / total_requests) * 100 < 0.01"
+
+startup_time:
+  target: 2
+  unit: s
+  measurement_method: "time from process start to first successful health-check response"
+
+key_store_lookup_timeout:
+  target: 200
+  unit: ms
+  measurement_method: "unit test with mock store that sleeps 201ms; assert response is 401 within 250ms"
+
+queue_wait_timeout:
+  target: 10
+  unit: s
+  measurement_method: "integration test: saturate workers, assert 503 returned within 10s + 500ms tolerance"
